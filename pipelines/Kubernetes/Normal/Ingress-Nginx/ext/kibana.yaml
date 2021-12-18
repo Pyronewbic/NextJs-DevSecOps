@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+spec:
+  type: ExternalName
+  externalName: kibana.kube-logging.svc.cluster.local

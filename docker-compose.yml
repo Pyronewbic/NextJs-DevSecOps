@@ -1,0 +1,46 @@
+version: '3.7'
+
+services:
+
+  mongodb:
+    container_name: mongodb
+    image: docker.io/bitnami/mongodb:4.4
+    environment:
+      - MONGODB_USERNAME=kan
+      - MONGODB_PASSWORD=ItCouldBeAnything
+      - MONGODB_DATABASE=db
+      - MONGODB_ROOT_PASSWORD=1nkn&523
+    ports:
+      - "27017:27017"
+    volumes:
+      - './data:/bitnami/mongodb'
+    networks:
+      - backend  
+
+  scope:
+    image: weaveworks/scope:1.13.2
+    privileged: true
+    labels:
+      - "works.weave.role=system"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:rw"
+    command:
+      - "--probe.docker=true"
+    ports:
+      - "4040:4040"   
+
+  node:
+    container_name: frontend
+    restart: always
+    build:
+      context: .
+    depends_on:
+      - mongodb
+    ports: 
+      - "8080:8080"
+    networks:
+      - backend     
+
+networks:
+  backend:
+    driver: bridge

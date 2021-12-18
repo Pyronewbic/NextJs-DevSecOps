@@ -1,0 +1,16 @@
+sa: dev-acc
+namespace: dev
+spec:
+  minReplicas: 1
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 50
+mongodb:
+  host: "bW9uZ29kYg=="
+  port: "MjcwMTc="
+  username: "a2Fu"
+  password: "SXRDb3VsZEJlQW55dGhpbmc="
+  db: "ZnJhY3Rpb25hbA=="
+  rootpassword: "MW5rbiY1MjM="
+config:
+  configmap: config-dev
+  secret: secrets-dev

@@ -1,0 +1,199 @@
+def ENV_LABEL = null
+def NS = null
+def services = "frontend"
+def errorMessage = null
+def gitCommit = null
+def builds = [:]
+
+pipeline {
+    agent any
+    options { 
+        skipDefaultCheckout() 
+        timeout(time: 30, unit: 'MINUTES')    
+    }
+    environment {
+        NODE_OPTIONS = "--max-old-space-size=3096"
+        HANDOLINT_IMG = "docker.io/hadolint/hadolint:latest"
+        GITLEAKS_IMG = "docker.io/zricethezav/gitleaks:latest"
+        ECR_URL = "" // Your ECR Url
+        DEPLOY_NS_DEV = "dev"
+        DEPLOY_NS_QA = "qa"
+        DEPLOY_NS_UAT = "uat"
+        INGRESS_NS = "ingress-nginx"
+    }
+      
+    stages{
+
+        stage('SCM: Checkout Code'){
+            steps{
+                script{
+                    cleanWs()
+                    checkout scm
+                    sh 'printenv'
+                    gitCommit = sh(returnStdout: true, script: 'git describe --always').trim()
+                    if (scm.branches[0].name == 'development' ) {
+                      ENV_LABEL = "DEV"
+                    } else if (scm.branches[0].name == 'QA' ) {
+                      ENV_LABEL = "QA"
+                    } else if (scm.branches[0].name == 'UAT' ) {
+                      ENV_LABEL = "UAT"
+                    } 
+                }
+                
+            }
+        }
+
+        stage('Gitleaks: Secret Creds check'){
+            steps{
+                script{
+                    try{
+                        sh 'echo "Running Gitleaks!"'
+                        sh 'docker run --rm -v ${PWD}:/frontend $GITLEAKS_IMG --path="/frontend" --commit=latest'
+                    }catch(exec){
+                        errorMessage = "Gitleaks secret creds check has failed!"
+                        sh 'exit 1'
+                    }
+                    
+                }              
+            }
+        }
+
+        stage('Handolint: Dockerfile Linter'){
+            steps{
+                script{
+                    echo "Running Handolint Dockerfile Linter!"
+                    def exitCode = sh(script: "docker run --rm -i $HANDOLINT_IMG < Dockerfile", returnStatus: true)
+                    if (exitCode != 0) {
+                        errorMessage = "Handolint run on ${PWD}/Dockerfile has warnings/errors!"
+                        echo "$errorMessage"
+                        sh 'exit 1'
+                    }else{
+                        echo "Handolint run on ${PWD}/Dockerfile returned no errors!"
+                    }
+                }
+                
+            }
+        }
+         
+        stage('Docker: Build Image(s)'){
+            when{
+                anyOf { branch 'development'; branch 'QA'; branch 'UAT' } 
+            }
+            steps{
+                script{
+                    try{
+                        sh "aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin $ECR_URL"
+                        def values = services.split(',')
+						values.each{ service ->
+                            builds[service] = { 
+							    sh """
+                                echo 'Building Service for ${service}'
+							    docker build -t ${ECR_URL}/frontend-${service}:${gitCommit} .
+                                docker push ${ECR_URL}/frontend-${service}:${gitCommit}
+							    """
+                            }
+                        }
+                        parallel builds
+                    }catch(exec){
+                        errorMessage = "Jenkins Failed during BuildImage stage"
+                        sh 'exit 1'
+                    }          
+                    
+                }
+            }
+        }     
+
+        stage('Checks: Pre-Deployment'){
+            when{
+                anyOf { branch 'development'; branch 'QA'; branch 'UAT' } 
+            }
+            steps{
+                script{
+                    echo "Setting Kubernetes context for ${ENV_LABEL}"
+                    sh "chmod +x ${WORKSPACE}/pipelines/Jenkins/scripts/pre.sh"
+                    if (ENV_LABEL == "DEV"){
+                        NS = DEPLOY_NS_DEV
+                    }else if (ENV_LABEL == "QA"){
+                        NS = DEPLOY_NS_QA
+                    }else if (ENV_LABEL == "UAT"){
+                        NS = DEPLOY_NS_UAT
+                    }
+
+                    def pred = sh(script:"${WORKSPACE}/pipelines/Jenkins/scripts/pre.sh ${NS} ${ENV_LABEL}", returnStatus:true)
+                
+                    if("$pred" == "0"){
+                        echo "Pre-Deployment Checks Successful"
+                    }else{
+                        errorMessage = "Pre-Deployment Checks Failed, Please Check The Logs For More Details"
+                        sh "exit 1"
+                    }
+                }
+            }
+        }
+
+        stage('Helm: Deploy Service(s)'){
+            when {
+                anyOf { branch 'development'; branch 'QA'; branch 'UAT' } 
+            }
+            steps{
+                script{
+                    try{
+                        sh """
+                        echo 'Performing deployment for ENV ${ENV_LABEL}'
+                        echo 'Applying Latest Ingress-Nginx Configuration'
+                        kubectl apply -f ./pipelines/Kubernetes/Normal/Ingress-Nginx/ext/frontend-${ENV_LABEL}.yaml -n ${INGRESS_NS}
+                        kubectl apply -f ./pipelines/Kubernetes/Normal/Ingress-Nginx/Ingress.yaml -n ${INGRESS_NS}"""
+                        echo "Applying Latest ConfigMap & Secrets (Helm)"
+                        sh "helm upgrade --install -n ${NS} config ./pipelines/Kubernetes/Helm/services-config --values=./pipelines/Kubernetes/Helm/env/${ENV_LABEL}.yaml"
+                        def values = services.split(',')
+                        values.each{ service -> 
+                            sh "helm upgrade --install -n ${NS} ${service} ./pipelines/Kubernetes/Helm/services --set deployment.tag=${gitCommit} --values=./pipelines/Kubernetes/Helm/env/${ENV_LABEL}.yaml --values=./pipelines/Kubernetes/Helm/services/service/${service}.yaml"
+                        }
+                        echo "Listing Helm Charts on ns ${NS}"
+                        sh "helm ls -n ${NS}"
+                    }catch(exec){
+                        errorMessage = "Deployment for ${ENV_LABEL} failed"
+                        sh "exit 1"
+                    }
+                    
+                }
+            }
+        }
+
+        stage('Checks: Post-Deployment'){
+            when{
+                anyOf { branch 'development'; branch 'QA'; branch 'UAT' } 
+            }
+            steps{
+                script{
+                    sh "sleep 60s"
+                    sh "chmod +x ${WORKSPACE}/pipelines/Jenkins/scripts/post.sh"
+                    def values = services.split(',')
+                    values.each{ service -> 
+                        def post = sh(script:"${WORKSPACE}/pipelines/Jenkins/scripts/post.sh ${service} ${NS}", returnStatus:true)
+                        if("$post" == "0"){
+                            echo "Post-Deployment Checks are Successful for ${service}"
+                        }else{
+                            errorMessage = "Post-Deployment have Checks Failed for ${service}"
+                            sh "exit 1"
+                        }
+                    }
+                          
+                }
+            }
+        }
+
+    }
+
+    post {
+       always {
+           echo "\n"
+       }
+       success{
+           echo "Nothing messed up, Hallelujah!"
+       }
+       failure {
+           echo "Error: ${errorMessage}"
+       }
+   }
+}

@@ -1,0 +1,15 @@
+deployment:
+  image: docker.io/bitnami/mongodb
+  tag: 4.4
+  user: 1001
+name: mongodb
+ports: 
+  port: 27017
+  targetPort: 27017
+resources:
+  requests:
+    cpu: 128m
+    memory: 256Mi
+  limits:
+    cpu: 256m
+    memory: 512Mi
